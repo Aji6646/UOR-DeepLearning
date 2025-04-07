@@ -1,7 +1,16 @@
 services:
   - type: web
-    name: yolo-road-detect
+    name: road-object-detection
     env: python
-    buildCommand: pip install -r requirements.txt
-    startCommand: streamlit run Code-v7.py
+    region: oregon  # or frankfurt, singapore, etc. (based on your location)
     plan: free
+
+    # Build and start configuration
+    buildCommand: pip install -r requirements.txt
+    startCommand: streamlit run streamlit_app.py --server.port $PORT --server.address 0.0.0.0
+
+    # Optional auto-deploy on every push
+    autoDeploy: true
+
+    # Python version (optional)
+    runtime: python
