@@ -1,2 +1,10 @@
 streamlit
 pandas
+torch
+torchvision
+opencv-python
+numpy
+matplotlib
+Pillow
+tqdm
+
