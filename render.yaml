@@ -1,0 +1,7 @@
+services:
+  - type: web
+    name: yolo-road-detect
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: streamlit run Code-v7.py
+    plan: free
