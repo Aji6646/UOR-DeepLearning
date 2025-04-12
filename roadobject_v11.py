@@ -4,7 +4,8 @@ import cv2
 import numpy as np
 from PIL import Image
 from ultralytics import YOLO
-from torchvision.models.detection import fasterrcnn_resnet50_fpn, deeplabv3_resnet50
+from torchvision.models.detection import fasterrcnn_resnet50_fpn
+from torchvision.models.segmentation import deeplabv3_resnet50
 from torchvision import transforms
 from transformers import SegformerFeatureExtractor, SegformerForSemanticSegmentation
 
