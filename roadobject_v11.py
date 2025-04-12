@@ -1,187 +1,101 @@
-import os
-import random
-import time
-import zipfile
-import urllib.request
-import gdown
+import streamlit as st
+import torch
 import cv2
 import numpy as np
-import torch
-from flask import Flask, request, render_template_string, send_from_directory, url_for
-from pyngrok import ngrok, conf
-import matplotlib.pyplot as plt
-from torchvision.models.detection import fasterrcnn_resnet50_fpn
-from torchvision import transforms
-from torchvision.ops import box_iou
+from PIL import Image
 from ultralytics import YOLO
+from torchvision.models.detection import fasterrcnn_resnet50_fpn, deeplabv3_resnet50
+from torchvision import transforms
 from transformers import SegformerFeatureExtractor, SegformerForSemanticSegmentation
-from tqdm import tqdm
-from dotenv import load_dotenv
 
-# ========== ENV & AUTH SETUP ==========
-load_dotenv()
-ngrok.set_auth_token(os.getenv("NGROK_AUTH_TOKEN"))
-conf.get_default().region = "us"
-conf.get_default().bind_tls = True
+# Title
+st.title("Road Object Detection")
 
-# ========== PATH SETUP ==========
-UPLOAD_FOLDER = "uploads"
-RESULT_FOLDER = "results"
-os.makedirs(UPLOAD_FOLDER, exist_ok=True)
-os.makedirs(RESULT_FOLDER, exist_ok=True)
+# Sidebar model selection
+model_choice = st.sidebar.selectbox("Choose a model", ("YOLOv8", "Faster R-CNN", "DeepLabV3", "SegFormer"))
 
-# ========== DEVICE ==========
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-print(f"Using device: {device}")
+# Image uploader
+uploaded_file = st.file_uploader("Upload an image", type=["jpg", "jpeg", "png"])
 
-# ========== DOWNLOAD FILES ==========
-def download_dataset_files():
-    os.makedirs("data", exist_ok=True)
-    if not os.path.exists("data/archive.zip"):
-        gdown.download(id="1i8D3bvLy8_vIbbn3gQXLbYYzNi3Kw7ED", output="data/archive.zip", quiet=False)
-    if not os.path.exists("data/new_test.zip"):
-        gdown.download(id="1460hpGSD2yVazBvdKvfsN41krYZEG3yT", output="data/new_test.zip", quiet=False)
+if uploaded_file:
+    image = Image.open(uploaded_file).convert("RGB")
+    image_np = np.array(image)
+    image_cv = cv2.cvtColor(image_np, cv2.COLOR_RGB2BGR)
 
-    with zipfile.ZipFile("data/archive.zip", 'r') as zip_ref:
-        zip_ref.extractall("data/bdd100k")
-    with zipfile.ZipFile("data/new_test.zip", 'r') as zip_ref:
-        zip_ref.extractall("data/new_test")
+    processed_image_cv = image_cv.copy()
 
-    if not os.path.exists("yolov3.pt"):
-        urllib.request.urlretrieve("https://github.com/ultralytics/yolov3/releases/download/v9.6/yolov3.pt", "yolov3.pt")
+    if model_choice == "YOLOv8":
+        st.write("Running YOLOv8...")
+        model = YOLO("yolov8n.pt")
+        results = model(image_cv)[0]
 
-download_dataset_files()
+        for box in results.boxes:
+            x1, y1, x2, y2 = map(int, box.xyxy[0])
+            label = model.names[int(box.cls[0])]
+            conf = float(box.conf[0])
+            cv2.rectangle(processed_image_cv, (x1, y1), (x2, y2), (0, 255, 0), 2)
+            cv2.putText(processed_image_cv, f"{label} {conf:.2f}", (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,255,0), 2)
 
-# ========== MODEL INITIALIZATION ==========
-yolo_model = YOLO("yolov3.pt")
-faster_rcnn_model = fasterrcnn_resnet50_fpn(pretrained=True).eval()
-deeplab_model = torch.hub.load('pytorch/vision:v0.13.0', 'deeplabv3_resnet101', pretrained=True).eval()
-
-feature_extractor = SegformerFeatureExtractor.from_pretrained("nvidia/segformer-b0-finetuned-ade-512-512")
-segformer_model = SegformerForSemanticSegmentation.from_pretrained("nvidia/segformer-b0-finetuned-ade-512-512")
-
-# ========== MAIN PROCESS FUNCTION ==========
-def process_data(dataset_path, output_folder, is_flask=False):
-    os.makedirs(output_folder, exist_ok=True)
-
-    if os.path.isfile(dataset_path):
-        processing_list = [dataset_path]
-    else:
-        image_paths = glob.glob(os.path.join(dataset_path, "*.jpg"))
-        sampled_images = random.sample(image_paths, min(10, len(image_paths)))
-        processing_list = sampled_images
-
-    metrics_list = []
-    iterator = tqdm(processing_list, desc="Processing") if not is_flask else processing_list
-
-    for img_path in iterator:
-        image = cv2.imread(img_path)
-        image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-
-        # YOLO Detection
-        yolo_start = time.time()
-        yolo_results = yolo_model(img_path, conf=0.5, iou=0.5, max_det=50)
-        yolo_time = (time.time() - yolo_start) * 1000
-
-        yolo_img = yolo_results[0].plot()
-        yolo_filename = os.path.basename(img_path)
-        cv2.imwrite(os.path.join(output_folder, yolo_filename), cv2.cvtColor(yolo_img, cv2.COLOR_RGB2BGR))
-
-        # Segmentation
-        seg_start = time.time()
-        preprocess = transforms.Compose([
-            transforms.ToTensor(),
-            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+    elif model_choice == "Faster R-CNN":
+        st.write("Running Faster R-CNN...")
+        model = fasterrcnn_resnet50_fpn(pretrained=True)
+        model.eval()
+        transform = transforms.Compose([
+            transforms.ToTensor()
         ])
-        input_tensor = preprocess(image_rgb).unsqueeze(0).to(device)
+        input_tensor = transform(image).unsqueeze(0)
         with torch.no_grad():
-            output = deeplab_model(input_tensor)["out"][0]
-        segmentation = output.argmax(0).byte().cpu().numpy()
-        seg_time = (time.time() - seg_start) * 1000
+            predictions = model(input_tensor)[0]
 
-        colormap = np.zeros((segmentation.shape[0], segmentation.shape[1], 3), dtype=np.uint8)
-        colormap[segmentation == 15] = [255, 0, 0]  # Red for person
-        colormap[segmentation == 7] = [0, 255, 0]   # Green for car
-        seg_filename = f"seg_{os.path.basename(img_path)}"
-        cv2.imwrite(os.path.join(output_folder, seg_filename), cv2.cvtColor(colormap, cv2.COLOR_RGB2BGR))
+        for box, label, score in zip(predictions['boxes'], predictions['labels'], predictions['scores']):
+            if score > 0.5:
+                x1, y1, x2, y2 = map(int, box)
+                cv2.rectangle(processed_image_cv, (x1, y1), (x2, y2), (255, 0, 0), 2)
+                cv2.putText(processed_image_cv, f"Label {label.item()} {score:.2f}", (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255,0,0), 2)
 
-        pred_boxes = torch.tensor([box.xyxy[0].tolist() for box in yolo_results[0].boxes]) if yolo_results[0].boxes else torch.empty(0)
-        frcnn_tensor = transforms.ToTensor()(image).unsqueeze(0)
+    elif model_choice == "DeepLabV3":
+        st.write("Running DeepLabV3...")
+        model = deeplabv3_resnet50(pretrained=True).eval()
+        transform = transforms.Compose([
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+        ])
+        input_tensor = transform(image).unsqueeze(0)
         with torch.no_grad():
-            frcnn_results = faster_rcnn_model(frcnn_tensor)
-        gt_boxes = frcnn_results[0]['boxes'] if len(frcnn_results[0]['boxes']) > 0 else torch.empty(0)
-        iou = box_iou(pred_boxes, gt_boxes).mean().item() if pred_boxes.numel() > 0 and gt_boxes.numel() > 0 else 0.0
+            output = model(input_tensor)['out'][0]
+        output_predictions = output.argmax(0).byte().cpu().numpy()
+        mask = cv2.applyColorMap((output_predictions * 10).astype(np.uint8), cv2.COLORMAP_JET)
+        processed_image_cv = cv2.addWeighted(image_cv, 0.6, mask, 0.4, 0)
 
-        metrics = {
-            "yolo_time": yolo_time,
-            "seg_time": seg_time,
-            "iou": iou
-        }
-        metrics_list.append(metrics)
+    elif model_choice == "SegFormer":
+        st.write("Running SegFormer...")
+        feature_extractor = SegformerFeatureExtractor.from_pretrained("nvidia/segformer-b0-finetuned-ade-512-512")
+        model = SegformerForSemanticSegmentation.from_pretrained("nvidia/segformer-b0-finetuned-ade-512-512")
 
-    return metrics_list
+        inputs = feature_extractor(images=image, return_tensors="pt")
+        with torch.no_grad():
+            outputs = model(**inputs)
 
-# ========== FLASK APP ==========
-app = Flask(__name__)
-app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
+        logits = outputs.logits
+        segmentation = logits.argmax(dim=1)[0].cpu().numpy()
+        mask = cv2.applyColorMap((segmentation * 10).astype(np.uint8), cv2.COLORMAP_TURBO)
+        processed_image_cv = cv2.addWeighted(image_cv, 0.6, mask, 0.4, 0)
 
-@app.route("/", methods=["GET", "POST"])
-def index():
-    if request.method == "POST":
-        file = request.files["file"]
-        if not file:
-            return "No file uploaded!", 400
+    # Convert final output to RGB
+    output_image = cv2.cvtColor(processed_image_cv, cv2.COLOR_BGR2RGB)
 
-        filepath = os.path.join(app.config['UPLOAD_FOLDER'], file.filename)
-        file.save(filepath)
+    # Display original and output images side by side
+    col1, col2 = st.columns(2)
+    with col1:
+        st.image(image, caption="Original Image", use_column_width=True)
+    with col2:
+        st.image(output_image, caption="Detection / Segmentation Result", use_column_width=True)
 
-        metrics_list = process_data(filepath, RESULT_FOLDER, is_flask=True)
-        metrics = metrics_list[0]
-
-        original_url = url_for('upload_file', filename=file.filename)
-        yolo_url = url_for('result_file', filename=file.filename)
-        seg_url = url_for('result_file', filename=f"seg_{file.filename}")
-
-        return render_template_string('''
-            <div style="display:flex;flex-direction:column;align-items:center; justify-content:center">
-            <h1>Results</h1>
-            <div style="display: flex; gap: 20px;">
-                <div><img src="{{ original_url }}" width="300"><br>Original</div>
-                <div><img src="{{ yolo_url }}" width="300"><br>YOLO Detection</div>
-                <div><img src="{{ seg_url }}" width="300"><br>Segmentation</div>
-            </div>
-            <h3 style="margin-top:30px;">Metrics</h3>
-            <div style="width:250px; text-align:left;margin-top:10px;">
-            <p>YOLO Inference: {{ metrics.yolo_time | round(1) }} ms</p>
-            <p>Segmentation Inference: {{ metrics.seg_time | round(1) }} ms</p>
-            <p>Mean IoU: {{ metrics.iou | round(2) }}</p>
-            </div>
-            <a href="/">Upload Another</a>
-            </div>
-        ''', original_url=original_url, yolo_url=yolo_url, seg_url=seg_url, metrics=metrics)
-
-    return render_template_string('''
-        <div style="display:flex;flex-direction:column; justify-content:center; align-items:center">
-        <h1 style="text-align:center">Upload Image</h1>
-        <form method="post" enctype="multipart/form-data" style="text-align:center">
-            <input type="file" name="file" accept=".jpg,.jpeg,.png" required>
-            <input type="submit" value="Upload">
-        </form>
-        </div>
-    ''')
-
-@app.route("/results/<filename>")
-def result_file(filename):
-    return send_from_directory(RESULT_FOLDER, filename)
-
-@app.route("/uploads/<filename>")
-def upload_file(filename):
-    return send_from_directory(UPLOAD_FOLDER, filename)
-
-if __name__ == "__main__":
-    try:
-        tunnel = ngrok.connect(5000)
-        print(f"Public URL: {tunnel.public_url}")
-        app.run(host="0.0.0.0", port=5000)
-    except Exception as e:
-        print(f"Error starting app: {e}")
+    # Add download button
+    result_pil = Image.fromarray(output_image)
+    st.download_button(
+        label="Download Result Image",
+        data=result_pil.tobytes(),
+        file_name="result.png",
+        mime="image/png"
+    )
